@@ -26,12 +26,6 @@ DEFAULTS = {
 }
 
 
-def to_bool(value):
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("true", "1", "yes", "on")
-
-
 def normalize_key(key):
     key = key.strip().lower()
     if key == "num_workers":
@@ -42,10 +36,17 @@ def normalize_key(key):
 def convert_value(key, value):
     if key in ("port", "workers"):
         return int(value)
+
     if key == "debug":
-        return to_bool(value)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in (
+            "true", "1", "yes", "on"
+        )
+
     if key in ("log_level", "api_key"):
         return str(value)
+
     return value
 
 
@@ -55,6 +56,7 @@ def load_config():
 
     # Layer 2: YAML configuration
     yaml_path = Path("config.development.yaml")
+
     if yaml_path.exists():
         with yaml_path.open("r", encoding="utf-8") as file:
             yaml_data = yaml.safe_load(file) or {}
@@ -66,18 +68,26 @@ def load_config():
                     config[key] = value
 
     # Layer 3: .env file
-    # Do not override OS environment variables already present.
+    # Existing OS environment variables are not overwritten.
     load_dotenv(override=False)
 
+    # Layer 4: environment variables
     for key in config:
-        env_key = "APP_" + (
-            "NUM_WORKERS" if key == "workers" else key.upper()
-        )
-        value = os.environ.get(env_key)
-        if value is not None:
-            config[key] = value
+        if key == "workers":
+            env_names = [
+                "APP_NUM_WORKERS",
+                "APP_WORKERS",
+            ]
+        else:
+            env_names = ["APP_" + key.upper()]
 
-    # Convert values to their required types.
+        for env_name in env_names:
+            value = os.environ.get(env_name)
+            if value is not None:
+                config[key] = value
+                break
+
+    # Convert configuration values to the correct types.
     for key in config:
         config[key] = convert_value(key, config[key])
 
@@ -88,7 +98,7 @@ def load_config():
 def home():
     return {
         "status": "ok",
-        "service": "effective-config-api"
+        "service": "effective-config-api",
     }
 
 
@@ -96,8 +106,8 @@ def home():
 async def effective_config(request: Request):
     config = load_config()
 
-    # Layer 5: CLI-style overrides, e.g.
-    # ?set=port=8321&set=workers=9
+    # Layer 5: CLI-style overrides.
+    # Example: ?set=port=8574&set=debug=true
     for item in request.query_params.getlist("set"):
         if "=" not in item:
             continue
@@ -108,7 +118,7 @@ async def effective_config(request: Request):
         if key in config:
             config[key] = convert_value(key, value)
 
-    # Mask the secret in the response using exactly four stars.
+    # Return a masked API key.
     config["api_key"] = "****"
 
     return config
