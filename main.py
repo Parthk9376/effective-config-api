@@ -2,18 +2,17 @@
 import os
 from pathlib import Path
 
+import yaml
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-import yaml
-
-load_dotenv()
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -26,69 +25,90 @@ DEFAULTS = {
     "api_key": "default-secret-000",
 }
 
+
+def to_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def normalize_key(key):
+    key = key.strip().lower()
+    if key == "num_workers":
+        return "workers"
+    return key
+
+
+def convert_value(key, value):
+    if key in ("port", "workers"):
+        return int(value)
+    if key == "debug":
+        return to_bool(value)
+    if key in ("log_level", "api_key"):
+        return str(value)
+    return value
+
+
 def load_config():
+    # Layer 1: hardcoded defaults
     config = DEFAULTS.copy()
 
-    # Layer 2: YAML
+    # Layer 2: YAML configuration
     yaml_path = Path("config.development.yaml")
     if yaml_path.exists():
-        with open(yaml_path, "r") as f:
-            data = yaml.safe_load(f) or {}
-            config.update(data)
+        with yaml_path.open("r", encoding="utf-8") as file:
+            yaml_data = yaml.safe_load(file) or {}
 
-    # Layer 3: .env
+        if isinstance(yaml_data, dict):
+            for key, value in yaml_data.items():
+                key = normalize_key(key)
+                if key in config:
+                    config[key] = value
+
+    # Layer 3: .env file
+    # Do not override OS environment variables already present.
     load_dotenv(override=False)
-    for key, value in os.environ.items():
-        if key.startswith("APP_"):
-            name = key[4:].lower()
-            if name == "num_workers":
-                name = "workers"
-            config[name] = value
 
-    # Type conversion
-    for key in ("port", "workers"):
-        config[key] = int(config[key])
+    for key in config:
+        env_key = "APP_" + (
+            "NUM_WORKERS" if key == "workers" else key.upper()
+        )
+        value = os.environ.get(env_key)
+        if value is not None:
+            config[key] = value
 
-    value = str(config["debug"]).strip().lower()
-    config["debug"] = value in ("true", "1", "yes", "on")
-
-    for key in ("log_level", "api_key"):
-        config[key] = str(config[key])
+    # Convert values to their required types.
+    for key in config:
+        config[key] = convert_value(key, config[key])
 
     return config
 
+
 @app.get("/")
 def home():
-    return {"status": "ok", "service": "effective-config-api"}
+    return {
+        "status": "ok",
+        "service": "effective-config-api"
+    }
+
 
 @app.get("/effective-config")
 async def effective_config(request: Request):
     config = load_config()
 
-    # Highest precedence: CLI-style query parameters
-    for key, value in request.query_params.multi_items():
-        if key.lower() == "set":
-            continue
-
-    # Each set parameter contains key=value
+    # Layer 5: CLI-style overrides, e.g.
+    # ?set=port=8321&set=workers=9
     for item in request.query_params.getlist("set"):
         if "=" not in item:
             continue
-        key, value = item.split("=", 1)
-        key = key.strip().lower()
 
-        if key == "num_workers":
-            key = "workers"
+        key, value = item.split("=", 1)
+        key = normalize_key(key)
 
         if key in config:
-            config[key] = value
+            config[key] = convert_value(key, value)
 
-    config["port"] = int(config["port"])
-    config["workers"] = int(config["workers"])
-
-    value = str(config["debug"]).strip().lower()
-    config["debug"] = value in ("true", "1", "yes", "on")
-
-    config["api_key"] = "*****"
+    # Mask the secret in the response using exactly four stars.
+    config["api_key"] = "****"
 
     return config
